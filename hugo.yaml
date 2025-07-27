@@ -1,0 +1,22 @@
+baseURL: https://pages.sysraccoon.xyz/
+languageCode: ru-ru
+title: sys.raccoon pages
+
+pluralizeListTitles: false
+
+module:
+  imports:
+    - path: github.com/imfing/hextra
+
+menu:
+  main:
+    - name: Search
+      weight: 1
+      params:
+        type: search
+    - name: GitHub
+      weight: 2
+      url: "https://github.com/sysraccoon"
+      params:
+        icon: github
+
