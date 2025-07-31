@@ -6,16 +6,23 @@ pluralizeListTitles: false
 defaultContentLanguage: ru
 toc: false
 
-renderer:
+markup:
   goldmark:
     renderer:
       unsafe: true
+
+  highlight:
+    noClasses: false
 
 module:
   imports:
     - path: github.com/imfing/hextra
 
 params:
+  navbar:
+    displayTitle: true
+    displayLogo: false
+
   search:
     enable: true
     type: flexsearch
