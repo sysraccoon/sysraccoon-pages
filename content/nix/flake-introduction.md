@@ -442,3 +442,184 @@ nixpkgs.lib.genAttrs [
 
 Таким образом вызывая `nix develop` сможет работать на любой из перечисленных систем.
 
+## Сборка приложения
+
+Для демонстрации будет использоваться всё тоже приложение на go:
+
+```go {filename="main.go"}
+package main
+
+import (
+    "fmt"
+    "os"
+)
+
+func main() {
+    user := os.Getenv("USER")
+    fmt.Printf("hello %s\n", user);
+}
+```
+
+Чтобы его можно было собирать с помощью `go build` и устанавливать через `go install` добавляем рядом `go.mod`:
+
+```gomod {filename="go.mod"}
+module hello
+
+go 1.24.4
+```
+
+Наша задача получить готовый бинарный файл `hello` используя команду `nix build`. В целях уменьшения объёма кода я буду демонстрировать новый `flake.nix`, но ничего не мешает иметь в одном файле dev-окружение и пакеты:
+
+```nix {filename="flake.nix"}
+{
+  inputs = {
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-25.05";
+  };
+
+  outputs = { nixpkgs, ... }: let
+    system = "x86_64-linux";
+    pkgs = import nixpkgs { inherit system; };
+  in {
+    # ...
+  };
+}
+```
+
+Для сборки приложений на go используется функция [pkgs.buildGoModule](https://nixos.org/manual/nixpkgs/stable/#ssec-language-go):
+
+```nix {filename="flake.nix"}
+{
+  inputs = {
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-25.05";
+  };
+
+  outputs = { nixpkgs, ... }: let
+    system = "x86_64-linux";
+    pkgs = import nixpkgs { inherit system; };
+  in {
+    packages.${system}.default = pkgs.buildGoModule {
+      name = "hello";
+      src = ./.;
+      vendorHash = null;
+    };
+  };
+}
+```
+
+Стоит обратить внимание на `vendorHash` выставленный в `null`. Если у вашего проекта нет дополнительных зависимостей как в данном случае, то его нужно устанавливать в `null`. Если зависимости есть то можно задать `vendorHash` в виде пустой строки `""` (или `pkgs.lib.fakeHash`) и вызвать один раз `nix build`, в ошибке будет указан какой хеш ожидается, его и нужно будет указать в `flake.nix`. Подробнее можно почитать в документации: [vendorHash](https://nixos.org/manual/nixpkgs/stable/#var-go-vendorHash).
+
+Теперь приложение можно собрать с помощью `nix build`:
+
+```sh
+$ nix build
+$ file result/bin/hello
+result/bin/hello: ELF 64-bit LSB executable, x86-64, version 1 (SYSV), statically linked, not stripped
+$ result/bin/hello
+hello raccoon
+```
+
+Запустить через `nix run` без создания ссылки в `result`:
+
+```sh
+$ nix run
+hello raccoon
+```
+
+Установить в локальный профиль:
+
+```sh
+$ nix profile install
+$ which hello
+/home/raccoon/.nix-profile/bin/hello
+$ hello
+hello raccoon
+```
+
+И удалить его:
+```sh
+$ nix profile list
+Name:               hello
+Flake attribute:    packages.x86_64-linux.default
+Original flake URL: path:/store/projects/dev/personal/hello
+Locked flake URL:   path:/store/projects/dev/personal/hello?lastModified=...
+Store paths:        /nix/store/7cj8cqzgja27d05522g7n5i2padl2ig5-hello
+$ nix profile remove hello
+$ hello
+hello: command not found
+```
+
+Также как с `devShells` можно использовать `genAttrs` для того чтобы собирать приложение под разную архитектуру:
+
+```nix {filename="flake.nix"}
+{
+  inputs = {
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-25.05";
+  };
+
+  outputs = { nixpkgs, ... }: let
+    supportedSystems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
+    forAllSystems = nixpkgs.lib.genAttrs supportedSystems;
+  in {
+    packages = forAllSystems (system: let
+      pkgs = import nixpkgs { inherit system; };
+    in {
+      default = pkgs.buildGoModule {
+        name = "hello";
+        src = ./.;
+        vendorHash = null;
+      };
+    });
+  };
+}
+```
+
+Если запустить nix build на `x86_64-linux` с явным указанием `aarch64-linux`, то получим вот такую ошибку:
+
+```sh
+$ nix build .#packages.aarch64-linux.default
+error: a 'aarch64-linux' with features {} is required to build '/nix/store/dys9fm1n2qbi5518r7bm7bgfc7yixhfd-hello.drv', 
+but I am a 'x86_64-linux' with features {benchmark, big-parallel, kvm, nixos-test}
+```
+
+В NixOS есть возможность эмуляции для сборки под другие архитектуры (но всё также будет ограничено linux-ом, собрать приложение под MacOS так не выйдет). Редактируем `configuration.nix` добавляя в него систему которую нужно эмулировать:
+
+```nix {filename="/etc/nixos/configuration.nix",hl_lines=[3]}
+{ pkgs, lib, ... }: {
+  # ...
+  boot.binfmt.emulatedSystems = [ "aarch64-linux" ];
+  # ...
+}
+```
+
+Вызываем пересборку системы:
+
+```sh
+$ sudo nixos-rebuild switch
+```
+
+И пробуем повторно собрать приложение под ARM:
+
+```sh
+$ nix build .#packages.aarch64-linux.default
+$ file result/bin/hello
+result/bin/hello: ELF 64-bit LSB executable, ARM aarch64, version 1 (SYSV), statically linked, not stripped
+$ result/bin/hello
+hello raccoon
+```
+
+Про то как работать с другими языками в nix можно посмотреть в [документации](https://nixos.org/manual/nixpkgs/stable/#chap-language-support) или на реальных примерах в [nixpkgs](https://github.com/NixOS/nixpkgs).
+
+## Пара слов про Git
+
+Команды работающие с `flake.nix` учитывают наличие `.git` в директории проекта и начинают вести себя несколько иначе чем без неё так как дают внутри `outputs` доступ только к тем директориям и файлам, что добавлены в индекс git-а. Если увидите ошибку такого вида:
+
+```sh
+error: path '/nix/store/ljiipd36jsb6xipar4izj7lbm5z8ifiy-source/main.go' does not exist
+```
+
+То хоть тут и нет упоминания git, проблема скорее всего связана с ним. Достаточно добавить файл через `git add` и он будет доступен в дальнейшем внутри `flake.nix`.
+
+Хоть ошибка и не вносит ясность в происходящее, подобный контроль позволяет избежать ситуации когда на вашей системе всё работает и собирается, а на другой из-за недостающего файла нет.
+
+Другой важный момент, это то что `flake.lock` нужно коммитить с остальными файлами и не добавлять его в `.gitignore`, поскольку это позволит другим разработчикам (или вам же в будущем) получить такие же версии всех зависимостей.
+
