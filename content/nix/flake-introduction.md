@@ -259,7 +259,7 @@ $ nix develop
 }
 ```
 
-В `outputs` определяем dev-окружение через [mkShell](https://nixos.org/manual/nixpkgs/stable/#sec-pkgs-mkShell):
+В `outputs` импортируем содержимое `nixpkgs` указывая архитектуру с которой будем работать:
 
 ```nix {filename="flake.nix",hl_lines=[7]}
 {
@@ -267,13 +267,32 @@ $ nix develop
     nixpkgs.url = "github:nixos/nixpkgs/nixos-25.05";
   };
 
-  outputs = { nixpkgs, ... }: {
-    devShells.x86_64-linux.default = nixpkgs.legacyPackages.x86_64-linux.mkShell {};
+  outputs = { nixpkgs, ... }: let
+    pkgs = import nixpkgs { system = "x86_64-linux"; };
+  in {
+    # ...
   };
 }
 ```
 
-С привязкой к архитектуре разберёмся позже, пока добъёмся корректной работы. Уже сейчас можно запустить `nix develop` и оказаться в bash:
+Для создания dev-окружения можно воспользоваться [pkgs.mkShell](https://nixos.org/manual/nixpkgs/stable/#sec-pkgs-mkShell):
+
+```nix {filename="flake.nix",hl_lines=[7]}
+{
+  inputs = {
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-25.05";
+  };
+
+  outputs = { nixpkgs, ... }: let
+    pkgs = import nixpkgs { system = "x86_64-linux"; };
+  in {
+    devShells.x86_64-linux.default = pkgs.mkShell {};
+  };
+}
+```
+
+Уже сейчас можно запустить `nix develop` и оказаться в bash:
+
 ```sh
 $ nix develop
 $ echo $SHELL
@@ -281,17 +300,19 @@ $ echo $SHELL
 $ exit # или можно использовать ctrl+d
 ```
 
-Добавим `go` в создаваемое окружение:
+Добавим `go` в создаваемое окружение (список доступных пакетов можно найти [тут](https://search.nixos.org/packages?channel=25.05&type=packages)):
 
-```nix {filename="flake.nix",hl_lines=[8]}
+```nix {filename="flake.nix",hl_lines=[10]}
 {
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-25.05";
   };
 
-  outputs = { nixpkgs, ... }: {
-    devShells.x86_64-linux.default = nixpkgs.legacyPackages.x86_64-linux.mkShell {
-      packages = [ nixpkgs.legacyPackages.x86_64-linux.go ];
+  outputs = { nixpkgs, ... }: let
+    pkgs = import nixpkgs { system = "x86_64-linux"; };
+  in {
+    devShells.x86_64-linux.default = pkgs.mkShell {
+      packages = [ pkgs.go ];
     };
   };
 }
@@ -315,17 +336,19 @@ hello raccoon
 $ exit
 ```
 
-Чтобы поменять внутри окружения переменные окружения, достаточно прописать их в параметрах `mkShell`:
+Чтобы поменять переменные окружения, достаточно прописать их в параметрах `mkShell`:
 
-```nix {filename="flake.nix",hl_lines=[9]}
+```nix {filename="flake.nix",hl_lines=[11]}
 {
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-25.05";
   };
 
-  outputs = { nixpkgs, ... }: {
-    devShells.x86_64-linux.default = nixpkgs.legacyPackages.x86_64-linux.mkShell {
-      packages = [ nixpkgs.legacyPackages.x86_64-linux.go ];
+  outputs = { nixpkgs, ... }: let
+    pkgs = import nixpkgs { system = "x86_64-linux"; };
+  in {
+    devShells.x86_64-linux.default = pkgs.mkShell {
+      packages = [ pkgs.go ];
       USER = "capybara";
     };
   };
@@ -344,7 +367,7 @@ hello capybara
 
 Разобравшись с основной задачей, можно заняться рефакторингом. Вынесем архитектуру в отдельную переменную:
 
-```nix {filename="flake.nix",hl_lines=[7,9,10]}
+```nix {filename="flake.nix",hl_lines=[7,9,10,13]}
 {
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-25.05";
@@ -352,26 +375,10 @@ hello capybara
 
   outputs = { nixpkgs, ... }: let
     system = "x86_64-linux";
-  in {
-    devShells.${system}.default = nixpkgs.legacyPackages.${system}.mkShell {
-      packages = [ nixpkgs.legacyPackages.${system}.go ];
-      USER = "capybara";
-    };
-  };
-}
-```
-
-И также обращение к `nixpkgs`:
-
-```nix {filename="flake.nix",hl_lines=[8,10,11]}
-{
-  inputs = {
-    nixpkgs.url = "github:nixos/nixpkgs/nixos-25.05";
-  };
-
-  outputs = { nixpkgs, ... }: let
-    system = "x86_64-linux";
-    pkgs = nixpkgs.legacyPackages.${system};
+    pkgs = import nixpkgs {
+      # inherit system; эквивалентно system = system;
+      inherit system; 
+    }; 
   in {
     devShells.${system}.default = pkgs.mkShell {
       packages = [ pkgs.go ];
@@ -381,7 +388,7 @@ hello capybara
 }
 ```
 
-В данном случае мы привязаны к одной платформе `x86_64-linux`, но что если нужно иметь окружения и под другие (`aarch64-linux`, `aarch64-darwin`)? Можно конечно вручную скопировать текущий код под каждую из платформ, но лучше воспользоваться средствами которые предоставляет библиотека в nixpkgs, а именно [genAttrs](https://nixos.org/manual/nixpkgs/stable/#function-library-lib.attrsets.genAttrs). `genAttrs` принимает список строк и функцию которую нужно применить для каждого элемента из списка, на выходе возвращается объект у которого ключём выступает строка из списка, а значением результат работы функции над этим ключём. Проще всего понять на примере:
+В данном случае мы привязаны к одной платформе `x86_64-linux`, но что если нужно иметь окружения и под другие (`aarch64-linux`, `aarch64-darwin`...)? Можно конечно вручную скопировать текущий код под каждую из платформ, но лучше воспользоваться средствами которые предоставляет библиотека в nixpkgs, а именно [genAttrs](https://nixos.org/manual/nixpkgs/stable/#function-library-lib.attrsets.genAttrs). `genAttrs` принимает список строк и функцию которую нужно применить для каждого элемента из списка, на выходе возвращается объект у которого ключём выступает строка из списка, а значением результат вызова функции с этим ключём. Проще всего понять на примере:
 
 ```nix
 nixpkgs.lib.genAttrs [
@@ -411,7 +418,7 @@ nixpkgs.lib.genAttrs [
     forAllSystems = nixpkgs.lib.genAttrs supportedSystems;
   in {
     devShells = forAllSystems (system: let
-      pkgs = nixpkgs.legacyPackages.${system};
+      pkgs = import nixpkgs { inherit system; };
     in {
       default = pkgs.mkShell {
         packages = [ pkgs.go ];
@@ -422,4 +429,16 @@ nixpkgs.lib.genAttrs [
 }
 ```
 
-И теперь используя одну из определённых архитектур можно получить рабочее окружение вызвав `nix develop`
+`supportedSystems` содержит список архитектур для которых нужно создать dev-окружение. `forAllSystems` это функция созданная через `genAttrs` у которой первый аргумент (список ключей) выставлен на основе `supportedSystems`. Данная функция вызывается для создания `devShells`, подставляя вместо `system` элементы из `supportedSystems`. В результате `devShells` содержит объект такого вида:
+
+```nix
+{
+  aarch64-darwin = { default = /* aarch64-darwin shell */; };
+  aarch64-linux = { default = /* aarch64-linux shell */; };
+  x86_64-darwin = { default = /* x64_64-darwin shell */; };
+  x86_64-linux = { default = /* x86_64-linux shell */; };
+}
+```
+
+Таким образом вызывая `nix develop` сможет работать на любой из перечисленных систем.
+
