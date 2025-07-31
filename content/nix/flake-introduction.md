@@ -86,9 +86,9 @@ Nix Flake - это формат описания Nix-проекта, котор�
 
   outputs = { nixpkgs, nixpkgs-unstable, ... }: {
     # Через packages определяются пакеты
-    packages.x86_64-linux.default = /*...*/; # Пакет
+    packages.x86_64-linux.default = /*...*/;
     # Через devShells преднастроенные dev-окружения
-    devShells.x86_64-linux.default = /*...*/; # 
+    devShells.x86_64-linux.default = /*...*/;
     # Через nixosConfigurations системные конфигурации для NixOS
     nixosConfigurations.hostname = /*...*/;
   };
@@ -216,3 +216,210 @@ Nix Flake - это формат описания Nix-проекта, котор�
 
 Всё это позволяет увеличить вероятность что проект успешно собираемый в одной системе, соберётся в другой.
 
+С теорией на этом можно закончить и перейти к практической части.
+
+## Создание dev-окружения
+
+Предположим есть простейший проект состоящий из одного файла `main.go`:
+
+```go {filename="main.go"}
+package main
+
+import (
+    "fmt"
+    "os"
+)
+
+func main() {
+    user := os.Getenv("USER")
+    fmt.Printf("hello %s\n", user);
+}
+```
+
+Для работы с ним понадобится установить `go`. Это можно сделать глобально в `configuration.nix` или для отдельного пользователя через `home-manager`, но в данном случае создадим dev-окружение что позволит определить все требуемые пакеты и переменные окружения в рамках проекта, чтобы каждый кто захочет поработать над ним мог выполнить команды:
+
+```sh
+$ git clone $REPO_URL
+$ nix develop
+```
+
+И получить все необходимые зависимости тех же версий что и у нас.
+
+Начнём с создания `flake.nix` в котором укажем что необходимо получить nixpkgs версии `nixos-25.05`:
+
+```nix {filename="flake.nix",hl_lines=[3]}
+{
+  inputs = {
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-25.05";
+  };
+
+  outputs = { nixpkgs, ... }: {
+    # ...
+  };
+}
+```
+
+В `outputs` определяем dev-окружение через [mkShell](https://nixos.org/manual/nixpkgs/stable/#sec-pkgs-mkShell):
+
+```nix {filename="flake.nix",hl_lines=[7]}
+{
+  inputs = {
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-25.05";
+  };
+
+  outputs = { nixpkgs, ... }: {
+    devShells.x86_64-linux.default = nixpkgs.legacyPackages.x86_64-linux.mkShell {};
+  };
+}
+```
+
+С привязкой к архитектуре разберёмся позже, пока добъёмся корректной работы. Уже сейчас можно запустить `nix develop` и оказаться в bash:
+```sh
+$ nix develop
+$ echo $SHELL
+/nix/store/ih68ar79msmj0496pgld4r3vqfr7bbin-bash-5.2p37/bin/bash
+$ exit # или можно использовать ctrl+d
+```
+
+Добавим `go` в создаваемое окружение:
+
+```nix {filename="flake.nix",hl_lines=[8]}
+{
+  inputs = {
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-25.05";
+  };
+
+  outputs = { nixpkgs, ... }: {
+    devShells.x86_64-linux.default = nixpkgs.legacyPackages.x86_64-linux.mkShell {
+      packages = [ nixpkgs.legacyPackages.x86_64-linux.go ];
+    };
+  };
+}
+```
+
+И попробуем ещё раз:
+
+```sh
+$ which go
+go not found
+$ nix develop
+$ which go
+/nix/store/9s1r393dnb5mygiq5f9yxy76nxpkz1gw-go-1.24.4/bin/go
+```
+
+Отлично, теперь можно запустить написанное приложение:
+
+```sh
+$ go run main.go
+hello raccoon
+$ exit
+```
+
+Чтобы поменять внутри окружения переменные окружения, достаточно прописать их в параметрах `mkShell`:
+
+```nix {filename="flake.nix",hl_lines=[9]}
+{
+  inputs = {
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-25.05";
+  };
+
+  outputs = { nixpkgs, ... }: {
+    devShells.x86_64-linux.default = nixpkgs.legacyPackages.x86_64-linux.mkShell {
+      packages = [ nixpkgs.legacyPackages.x86_64-linux.go ];
+      USER = "capybara";
+    };
+  };
+}
+```
+
+Теперь вызвав `nix develop`, можно убедиться что в переменной `USER` находится значение `capybara`:
+
+```sh
+$ nix develop
+$ echo $USER
+capybara
+$ go run main.go
+hello capybara
+```
+
+Разобравшись с основной задачей, можно заняться рефакторингом. Вынесем архитектуру в отдельную переменную:
+
+```nix {filename="flake.nix",hl_lines=[7,9,10]}
+{
+  inputs = {
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-25.05";
+  };
+
+  outputs = { nixpkgs, ... }: let
+    system = "x86_64-linux";
+  in {
+    devShells.${system}.default = nixpkgs.legacyPackages.${system}.mkShell {
+      packages = [ nixpkgs.legacyPackages.${system}.go ];
+      USER = "capybara";
+    };
+  };
+}
+```
+
+И также обращение к `nixpkgs`:
+
+```nix {filename="flake.nix",hl_lines=[8,10,11]}
+{
+  inputs = {
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-25.05";
+  };
+
+  outputs = { nixpkgs, ... }: let
+    system = "x86_64-linux";
+    pkgs = nixpkgs.legacyPackages.${system};
+  in {
+    devShells.${system}.default = pkgs.mkShell {
+      packages = [ pkgs.go ];
+      USER = "capybara";
+    };
+  };
+}
+```
+
+В данном случае мы привязаны к одной платформе `x86_64-linux`, но что если нужно иметь окружения и под другие (`aarch64-linux`, `aarch64-darwin`)? Можно конечно вручную скопировать текущий код под каждую из платформ, но лучше воспользоваться средствами которые предоставляет библиотека в nixpkgs, а именно [genAttrs](https://nixos.org/manual/nixpkgs/stable/#function-library-lib.attrsets.genAttrs). `genAttrs` принимает список строк и функцию которую нужно применить для каждого элемента из списка, на выходе возвращается объект у которого ключём выступает строка из списка, а значением результат работы функции над этим ключём. Проще всего понять на примере:
+
+```nix
+nixpkgs.lib.genAttrs [
+  "x86_64-linux"
+  "aarch64-linux"
+  "x86_64-darwin"
+  "aarch64-darwin"
+] (system: system + "_value")
+=> {
+  aarch64-darwin = "aarch64-darwin_value";
+  aarch64-linux = "aarch64-linux_value";
+  x86_64-darwin = "x86_64-darwin_value";
+  x86_64-linux = "x86_64-linux_value";
+}
+```
+
+С её помощью можно переписать `flake.nix` следующим образом:
+
+```nix {filename="flake.nix"}
+{
+  inputs = {
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-25.05";
+  };
+
+  outputs = { nixpkgs, ... }: let
+    supportedSystems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
+    forAllSystems = nixpkgs.lib.genAttrs supportedSystems;
+  in {
+    devShells = forAllSystems (system: let
+      pkgs = nixpkgs.legacyPackages.${system};
+    in {
+      default = pkgs.mkShell {
+        packages = [ pkgs.go ];
+        USER = "capybara";
+      };
+    });
+  };
+}
+```
+
+И теперь используя одну из определённых архитектур можно получить рабочее окружение вызвав `nix develop`
